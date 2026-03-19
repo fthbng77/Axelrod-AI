@@ -1,0 +1,56 @@
+# Default configuration for Axelrod-AI
+# Based on Harper 2017 + LOLA 2018 methodology
+
+environment:
+  memory_depth: 3
+  num_rounds: 200
+  noise: 0.0  # Set to 0.05 for noisy variant
+
+payoff:
+  R: 3  # Mutual cooperation
+  T: 5  # Temptation
+  S: 0  # Sucker
+  P: 1  # Mutual defection
+
+training:
+  num_episodes: 5000
+  log_interval: 500
+  seed: 42
+
+agents:
+  q_learning:
+    learning_rate: 0.15
+    discount_factor: 0.95
+    epsilon: 0.3
+    epsilon_decay: 0.9999
+    epsilon_min: 0.01
+
+  deep_q:
+    hidden_dims: [128, 64]
+    learning_rate: 0.0005
+    discount_factor: 0.95
+    epsilon: 1.0
+    epsilon_decay: 0.999
+    epsilon_min: 0.01
+    batch_size: 64
+    buffer_size: 10000
+    target_update_freq: 100
+
+  policy_gradient:
+    hidden_dims: [128, 64]
+    learning_rate: 0.001
+    discount_factor: 0.95
+    entropy_coef: 0.01
+
+  lola:
+    hidden_dim: 128
+    learning_rate: 0.001
+    opponent_lr: 0.001
+    lola_lr: 0.3
+    discount_factor: 0.95
+
+tournament:
+  turns: 200
+  repetitions: 5
+  include_classics: true
+  include_evolved: true
