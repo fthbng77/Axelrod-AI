@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.optim as optim
 from typing import Optional
 from src.agents.base import BaseAgent
-from src.environments.ipd import Action
+from src.environments.ipd import Action, NUM_FEATURES
 
 
 class LOLAPolicy(nn.Module):
@@ -21,16 +21,22 @@ class LOLAPolicy(nn.Module):
 
     def __init__(self, state_dim: int, hidden_dim: int = 64):
         super().__init__()
-        self.net = nn.Sequential(
+        self.hidden = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 2),
         )
+        self.output_layer = nn.Linear(hidden_dim, 2)
+        # Bias toward cooperation
+        with torch.no_grad():
+            self.output_layer.bias[0] = 1.0   # C bias
+            self.output_layer.bias[1] = -1.0   # D bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.softmax(self.net(x), dim=-1)
+        h = self.hidden(x)
+        logits = self.output_layer(h)
+        return torch.softmax(logits, dim=-1)
 
     def get_log_probs(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         probs = self.forward(state)
@@ -52,7 +58,7 @@ class LOLAAgent(BaseAgent):
     def __init__(
         self,
         name: str = "LOLA",
-        memory_depth: int = 3,
+        state_dim: int = NUM_FEATURES,
         hidden_dim: int = 64,
         learning_rate: float = 1e-3,
         opponent_lr: float = 1e-3,
@@ -61,28 +67,25 @@ class LOLAAgent(BaseAgent):
         use_opponent_model: bool = True,
         seed: Optional[int] = None,
     ):
-        super().__init__(name, memory_depth)
+        super().__init__(name, state_dim)
         self.gamma = discount_factor
-        self.lola_lr = lola_lr  # Weight of the LOLA correction term
+        self.lola_lr = lola_lr
         self.opponent_lr = opponent_lr
         self.use_opponent_model = use_opponent_model
         self.training = True
 
-        state_dim = memory_depth * 2
         self.device = torch.device("cpu")
 
-        # Own policy
         self.policy = LOLAPolicy(state_dim, hidden_dim).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
 
-        # Opponent model (differentiable)
         self.opponent_model = LOLAPolicy(state_dim, hidden_dim).to(self.device)
         self.opponent_optimizer = optim.Adam(
             self.opponent_model.parameters(), lr=opponent_lr
         )
 
-        # Episode buffers
         self.states: list[np.ndarray] = []
+        self.opp_states: list[np.ndarray] = []
         self.actions: list[int] = []
         self.opponent_actions: list[int] = []
         self.rewards: list[float] = []
@@ -102,9 +105,10 @@ class LOLAAgent(BaseAgent):
         else:
             return Action(probs.argmax().item())
 
-    def observe_opponent(self, state: np.ndarray, opponent_action: Action):
-        """Record opponent's action for opponent modeling."""
+    def observe_opponent(self, own_state: np.ndarray, opp_state: np.ndarray, opponent_action: Action):
+        """Record opponent's action and their state for opponent modeling."""
         self.opponent_actions.append(int(opponent_action))
+        self.opp_states.append(opp_state)
 
     def update(
         self,
@@ -133,7 +137,6 @@ class LOLAAgent(BaseAgent):
         actions_t = torch.LongTensor(self.actions).to(self.device)
         opp_actions_t = torch.LongTensor(self.opponent_actions).to(self.device)
 
-        # Compute discounted returns
         returns = []
         R = 0
         for r in reversed(self.rewards):
@@ -144,12 +147,13 @@ class LOLAAgent(BaseAgent):
             returns_t = (returns_t - returns_t.mean()) / (returns_t.std() + 1e-8)
 
         # === Step 1: Update opponent model ===
-        if self.use_opponent_model and len(self.opponent_actions) == len(self.states):
-            # Mirror state for opponent's perspective
-            md = self.memory_depth
-            opp_states_t = torch.cat(
-                [states_t[:, md:], states_t[:, :md]], dim=1
-            )
+        has_opp_data = (
+            self.use_opponent_model
+            and len(self.opponent_actions) == len(self.states)
+            and len(self.opp_states) == len(self.states)
+        )
+        if has_opp_data:
+            opp_states_t = torch.FloatTensor(np.array(self.opp_states)).to(self.device)
             opp_log_probs = self.opponent_model.get_log_probs(
                 opp_states_t, opp_actions_t
             )
@@ -164,8 +168,7 @@ class LOLAAgent(BaseAgent):
         pg_loss = -(log_probs * returns_t.detach()).mean()
 
         # === Step 3: LOLA correction ===
-        # Compute how opponent's next update will affect our reward
-        if self.use_opponent_model and len(self.opponent_actions) == len(self.states):
+        if has_opp_data:
             lola_correction = self._compute_lola_correction(
                 states_t, actions_t, returns_t
             )
@@ -178,8 +181,8 @@ class LOLAAgent(BaseAgent):
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
         self.optimizer.step()
 
-        # Clear buffers
         self.states.clear()
+        self.opp_states.clear()
         self.actions.clear()
         self.opponent_actions.clear()
         self.rewards.clear()
@@ -190,41 +193,23 @@ class LOLAAgent(BaseAgent):
         actions: torch.Tensor,
         returns: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute the LOLA correction term.
-
-        This estimates how the opponent's gradient step will affect
-        our expected return, and adds a term to steer opponent learning
-        in a direction favorable to us.
-        """
-        md = self.memory_depth
-        opp_states = torch.cat([states[:, md:], states[:, :md]], dim=1)
-
-        # Get opponent's policy probabilities (with gradient)
+        """Compute the LOLA correction term."""
+        opp_states = torch.FloatTensor(np.array(self.opp_states)).to(self.device)
         opp_probs = self.opponent_model(opp_states)
-
-        # Our expected return given opponent's current policy
         our_probs = self.policy(states)
         joint_prob = our_probs.gather(1, actions.unsqueeze(1)).squeeze()
-
-        # The correction: gradient of (our_return w.r.t. opponent_params)
-        # projected onto (opponent's gradient direction)
         weighted = (joint_prob * returns).mean()
-        return -weighted  # Negative because we want to maximize
+        return -weighted
 
     def reset(self):
         self.states.clear()
+        self.opp_states.clear()
         self.actions.clear()
         self.opponent_actions.clear()
         self.rewards.clear()
 
     def get_policy(self) -> dict:
-        return {
-            "type": "lola",
-            "lola_lr": self.lola_lr,
-            "model_state": {
-                k: v.tolist() for k, v in self.policy.state_dict().items()
-            },
-        }
+        return {"type": "lola", "lola_lr": self.lola_lr}
 
     def set_eval_mode(self):
         self.training = False

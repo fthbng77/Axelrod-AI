@@ -2,15 +2,15 @@
 
 from abc import ABC, abstractmethod
 import numpy as np
-from src.environments.ipd import Action
+from src.environments.ipd import Action, NUM_FEATURES
 
 
 class BaseAgent(ABC):
     """Abstract base for IPD RL agents."""
 
-    def __init__(self, name: str, memory_depth: int = 3):
+    def __init__(self, name: str, state_dim: int = NUM_FEATURES):
         self.name = name
-        self.memory_depth = memory_depth
+        self.state_dim = state_dim
 
     @abstractmethod
     def select_action(self, state: np.ndarray) -> Action:

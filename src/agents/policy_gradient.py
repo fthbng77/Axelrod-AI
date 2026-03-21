@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 from typing import Optional
 from src.agents.base import BaseAgent
-from src.environments.ipd import Action
+from src.environments.ipd import Action, NUM_FEATURES
 
 
 class PolicyNetwork(nn.Module):
@@ -23,11 +23,16 @@ class PolicyNetwork(nn.Module):
         for h in hidden_dims:
             layers.extend([nn.Linear(prev_dim, h), nn.ReLU()])
             prev_dim = h
-        layers.append(nn.Linear(prev_dim, 2))
+        self.output_layer = nn.Linear(prev_dim, 2)
         self.network = nn.Sequential(*layers)
+        # Bias toward cooperation: C logit starts higher
+        with torch.no_grad():
+            self.output_layer.bias[0] = 1.0   # C bias
+            self.output_layer.bias[1] = -1.0   # D bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        logits = self.network(x)
+        h = self.network(x)
+        logits = self.output_layer(h)
         return torch.softmax(logits, dim=-1)
 
 
@@ -37,24 +42,22 @@ class PolicyGradientAgent(BaseAgent):
     def __init__(
         self,
         name: str = "PolicyGradient",
-        memory_depth: int = 3,
+        state_dim: int = NUM_FEATURES,
         hidden_dims: list[int] = [64, 32],
         learning_rate: float = 1e-3,
         discount_factor: float = 0.95,
         entropy_coef: float = 0.01,
         seed: Optional[int] = None,
     ):
-        super().__init__(name, memory_depth)
+        super().__init__(name, state_dim)
         self.gamma = discount_factor
         self.entropy_coef = entropy_coef
         self.training = True
 
-        state_dim = memory_depth * 2
         self.device = torch.device("cpu")
         self.policy_net = PolicyNetwork(state_dim, hidden_dims).to(self.device)
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
 
-        # Episode buffers
         self.log_probs: list[torch.Tensor] = []
         self.rewards: list[float] = []
         self.entropies: list[torch.Tensor] = []
@@ -97,7 +100,6 @@ class PolicyGradientAgent(BaseAgent):
         if not self.rewards:
             return
 
-        # Compute discounted returns
         returns = []
         R = 0
         for r in reversed(self.rewards):
@@ -105,11 +107,9 @@ class PolicyGradientAgent(BaseAgent):
             returns.insert(0, R)
 
         returns = torch.FloatTensor(returns)
-        # Normalize returns (baseline)
         if len(returns) > 1:
             returns = (returns - returns.mean()) / (returns.std() + 1e-8)
 
-        # Policy gradient loss
         policy_loss = []
         for log_prob, entropy, R in zip(self.log_probs, self.entropies, returns):
             policy_loss.append(-log_prob * R - self.entropy_coef * entropy)
@@ -120,7 +120,6 @@ class PolicyGradientAgent(BaseAgent):
         torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)
         self.optimizer.step()
 
-        # Clear buffers
         self.log_probs.clear()
         self.rewards.clear()
         self.entropies.clear()
@@ -131,12 +130,7 @@ class PolicyGradientAgent(BaseAgent):
         self.entropies.clear()
 
     def get_policy(self) -> dict:
-        return {
-            "type": "policy_gradient",
-            "model_state": {
-                k: v.tolist() for k, v in self.policy_net.state_dict().items()
-            },
-        }
+        return {"type": "policy_gradient"}
 
     def set_eval_mode(self):
         self.training = False

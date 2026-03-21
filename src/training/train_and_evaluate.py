@@ -1,10 +1,10 @@
 """Main training + evaluation pipeline.
 
 Phase 1: Self-play training (Q-Learning, DQN, Policy Gradient, LOLA)
-Phase 2: Population training against Axelrod strategies
-Phase 3: Tournament evaluation against Harper 2017 baselines
+Phase 2: Tournament evaluation against Harper 2017 baselines
 
 Goal: Beat Harper 2017's evolved strategies in Axelrod tournaments.
+Uses Harper-compatible 17-feature state representation.
 """
 
 import sys
@@ -23,16 +23,16 @@ from src.tournament.axelrod_bridge import run_tournament, print_results
 def phase1_self_play(num_episodes: int = 2000) -> dict:
     """Phase 1: Train agents via self-play."""
     print("=" * 60)
-    print("PHASE 1: Self-Play Training")
+    print("PHASE 1: Self-Play Training (17-feature Harper state)")
     print("=" * 60)
 
     agents = {}
 
     # --- Q-Learning Self-Play ---
     print("\n--- Q-Learning Self-Play ---")
-    q1 = QLearningAgent("Q-Agent-1", memory_depth=3, learning_rate=0.15,
+    q1 = QLearningAgent("Q-Learning", learning_rate=0.15,
                          discount_factor=0.95, epsilon=0.3, seed=42)
-    q2 = QLearningAgent("Q-Agent-2", memory_depth=3, learning_rate=0.15,
+    q2 = QLearningAgent("Q-Learning-2", learning_rate=0.15,
                          discount_factor=0.95, epsilon=0.3, seed=123)
     trainer = SelfPlayTrainer(q1, q2, num_rounds=200, seed=42)
     trainer.train(num_episodes=num_episodes, log_interval=500)
@@ -40,9 +40,9 @@ def phase1_self_play(num_episodes: int = 2000) -> dict:
 
     # --- Deep Q Self-Play ---
     print("\n--- Deep Q-Network Self-Play ---")
-    dq1 = DeepQAgent("DQN-Agent-1", memory_depth=3, hidden_dims=[128, 64],
+    dq1 = DeepQAgent("Deep-Q", hidden_dims=[128, 64],
                       learning_rate=5e-4, epsilon=1.0, seed=42)
-    dq2 = DeepQAgent("DQN-Agent-2", memory_depth=3, hidden_dims=[128, 64],
+    dq2 = DeepQAgent("Deep-Q-2", hidden_dims=[128, 64],
                       learning_rate=5e-4, epsilon=1.0, seed=123)
     trainer = SelfPlayTrainer(dq1, dq2, num_rounds=200, seed=42)
     trainer.train(num_episodes=num_episodes, log_interval=500)
@@ -50,19 +50,19 @@ def phase1_self_play(num_episodes: int = 2000) -> dict:
 
     # --- Policy Gradient Self-Play ---
     print("\n--- Policy Gradient Self-Play ---")
-    pg1 = PolicyGradientAgent("PG-Agent-1", memory_depth=3, hidden_dims=[128, 64],
-                               learning_rate=1e-3, seed=42)
-    pg2 = PolicyGradientAgent("PG-Agent-2", memory_depth=3, hidden_dims=[128, 64],
-                               learning_rate=1e-3, seed=123)
+    pg1 = PolicyGradientAgent("PolicyGrad", hidden_dims=[128, 64],
+                               learning_rate=3e-4, entropy_coef=0.05, seed=42)
+    pg2 = PolicyGradientAgent("PolicyGrad-2", hidden_dims=[128, 64],
+                               learning_rate=3e-4, entropy_coef=0.05, seed=123)
     trainer = SelfPlayTrainer(pg1, pg2, num_rounds=200, seed=42)
     trainer.train(num_episodes=num_episodes, log_interval=500)
     agents["PolicyGrad"] = pg1
 
     # --- LOLA Self-Play ---
     print("\n--- LOLA Self-Play ---")
-    lola1 = LOLAAgent("LOLA-Agent-1", memory_depth=3, hidden_dim=128,
+    lola1 = LOLAAgent("LOLA", hidden_dim=128,
                        learning_rate=1e-3, lola_lr=0.3, seed=42)
-    lola2 = LOLAAgent("LOLA-Agent-2", memory_depth=3, hidden_dim=128,
+    lola2 = LOLAAgent("LOLA-2", hidden_dim=128,
                        learning_rate=1e-3, lola_lr=0.3, seed=123)
     trainer = SelfPlayTrainer(lola1, lola2, num_rounds=200, seed=42)
     trainer.train(num_episodes=num_episodes, log_interval=500)
@@ -72,9 +72,9 @@ def phase1_self_play(num_episodes: int = 2000) -> dict:
 
 
 def phase2_tournament(agents: dict) -> None:
-    """Phase 2: Tournament against Harper 2017 + classics."""
+    """Phase 2: Tournament against Harper 2017 + classics + EvolvedAttention."""
     print("\n" + "=" * 60)
-    print("PHASE 2: Tournament Evaluation")
+    print("PHASE 2: Tournament Evaluation (incl. EvolvedAttention)")
     print("=" * 60)
 
     rl_agents = list(agents.values())
@@ -89,7 +89,7 @@ def phase2_tournament(agents: dict) -> None:
 
     print_results(results)
 
-    # Summary: how did our agents rank?
+    # Summary
     print("\n--- Our RL Agents' Rankings ---")
     our_names = {a.name for a in rl_agents}
     for i, name in enumerate(results.ranked_names):
@@ -97,7 +97,6 @@ def phase2_tournament(agents: dict) -> None:
             avg = sum(results.normalised_scores[i]) / len(results.normalised_scores[i])
             print(f"  #{i+1}: {name} (score/turn: {avg:.4f})")
 
-    # Harper benchmark
     harper_names = {
         "Evolved ANN", "Evolved ANN 5", "Evolved ANN 5 Noise 05",
         "Evolved FSM 16", "Evolved FSM 16 Noise 05", "Evolved FSM 4",
@@ -136,7 +135,6 @@ if __name__ == "__main__":
     if not args.skip_training:
         agents = phase1_self_play(num_episodes=args.episodes)
     else:
-        # Quick agents for testing
         agents = {
             "Q-Learning": QLearningAgent("Q-Learning", seed=42),
             "Deep-Q": DeepQAgent("Deep-Q", seed=42),

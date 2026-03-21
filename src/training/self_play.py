@@ -6,7 +6,7 @@ Based on Harper 2017 methodology + modern improvements.
 
 import numpy as np
 from typing import Optional
-from src.environments.ipd import IPDEnvironment, Action
+from src.environments.ipd import IPDEnvironment, Action, compute_features
 from src.agents.base import BaseAgent
 
 
@@ -19,13 +19,11 @@ class SelfPlayTrainer:
         agent2: BaseAgent,
         num_rounds: int = 200,
         noise: float = 0.0,
-        memory_depth: int = 3,
         seed: Optional[int] = None,
     ):
         self.agent1 = agent1
         self.agent2 = agent2
         self.env = IPDEnvironment(
-            memory_depth=memory_depth,
             num_rounds=num_rounds,
             noise=noise,
             seed=seed,
@@ -59,30 +57,26 @@ class SelfPlayTrainer:
 
     def _run_episode(self) -> dict:
         """Run a single episode of self-play."""
-        state = self.env.reset()
+        state1, state2 = self.env.reset()
         self.agent1.reset()
         self.agent2.reset()
 
-        # Mirror state for agent2
-        md = self.env.memory_depth
-        state2 = np.concatenate([state[md:], state[:md]])
-
         for _ in range(self.env.num_rounds):
-            action1 = self.agent1.select_action(state)
+            action1 = self.agent1.select_action(state1)
             action2 = self.agent2.select_action(state2)
 
             state1_next, state2_next, r1, r2, done = self.env.step(action1, action2)
 
-            self.agent1.update(state, action1, r1, state1_next, done)
+            self.agent1.update(state1, action1, r1, state1_next, done)
             self.agent2.update(state2, action2, r2, state2_next, done)
 
-            # For LOLA agents: observe opponent actions
+            # For LOLA agents: observe opponent actions with proper states
             if hasattr(self.agent1, "observe_opponent"):
-                self.agent1.observe_opponent(state, action2)
+                self.agent1.observe_opponent(state1, state2, action2)
             if hasattr(self.agent2, "observe_opponent"):
-                self.agent2.observe_opponent(state2, action1)
+                self.agent2.observe_opponent(state2, state1, action1)
 
-            state = state1_next
+            state1 = state1_next
             state2 = state2_next
 
         return {
@@ -106,14 +100,12 @@ class PopulationTrainer:
         opponents: list,
         num_rounds: int = 200,
         noise: float = 0.0,
-        memory_depth: int = 3,
         seed: Optional[int] = None,
     ):
         self.agent = agent
-        self.opponents = opponents  # List of Axelrod player instances
+        self.opponents = opponents
         self.num_rounds = num_rounds
         self.noise = noise
-        self.memory_depth = memory_depth
         self.rng = np.random.default_rng(seed)
         self.history: list[dict] = []
 
@@ -150,58 +142,61 @@ class PopulationTrainer:
         return self.history
 
     def _play_against_axelrod(self, opponent) -> float:
-        """Play our RL agent against an Axelrod strategy."""
+        """Play our RL agent against an Axelrod strategy.
+
+        Uses compute_features to build states matching Harper's 17-feature encoding.
+        """
         import axelrod
 
+        self.agent.reset()
+        opponent.reset()
+
+        my_history: list[Action] = []
+        opp_history: list[Action] = []
+        total_score = 0.0
         env = IPDEnvironment(
-            memory_depth=self.memory_depth,
             num_rounds=self.num_rounds,
             noise=self.noise,
             seed=int(self.rng.integers(0, 2**31)),
         )
-        state = env.reset()
-        self.agent.reset()
-        opponent.reset()
 
-        opp_history = []
-        agent_history = []
-
-        for _ in range(self.num_rounds):
-            # Our agent chooses
+        for round_num in range(self.num_rounds):
+            state = compute_features(my_history, opp_history, round_num)
             action1 = self.agent.select_action(state)
 
-            # Axelrod opponent chooses
-            if not agent_history:
-                opp_action = opponent.strategy(axelrod.Player())
+            # Get Axelrod opponent's action
+            if not my_history:
+                opp_axl_action = opponent.strategy(axelrod.Player())
             else:
-                # Build a mock opponent from our agent's perspective
-                opp_action = self._get_axelrod_action(
-                    opponent, agent_history, opp_history
+                opp_axl_action = self._get_axelrod_action(
+                    opponent, my_history, opp_history
                 )
 
-            action2 = Action.COOPERATE if opp_action == axelrod.Action.C else Action.DEFECT
+            action2 = Action.COOPERATE if opp_axl_action == axelrod.Action.C else Action.DEFECT
 
-            state1, _, r1, _, done = env.step(action1, action2)
+            # Apply noise
+            actual1 = env._apply_noise(action1)
+            actual2 = env._apply_noise(action2)
 
-            self.agent.update(state, action1, r1, state1, done)
+            r1, _ = env.payoff.get_payoffs(actual1, actual2)
+            total_score += r1
 
-            agent_history.append(
-                axelrod.Action.C if action1 == Action.COOPERATE else axelrod.Action.D
-            )
-            opp_history.append(opp_action)
-            state = state1
+            my_history.append(actual1)
+            opp_history.append(actual2)
 
-        return env.scores[0]
+            next_state = compute_features(my_history, opp_history, round_num + 1)
+            done = round_num >= self.num_rounds - 1
+            self.agent.update(state, action1, r1, next_state, done)
 
-    def _get_axelrod_action(self, opponent, agent_history, opp_history):
+        return total_score
+
+    def _get_axelrod_action(self, opponent, my_history, opp_history):
         """Get action from an Axelrod strategy given histories."""
         import axelrod
 
-        # Create mock players with the correct history
-        mock_self = axelrod.Cooperator()
         mock_other = axelrod.Cooperator()
-        mock_self.history = axelrod.History(opp_history)
-        mock_other.history = axelrod.History(agent_history)
-
-        opponent.history = axelrod.History(opp_history)
+        axl_my = [axelrod.Action.C if a == Action.COOPERATE else axelrod.Action.D for a in my_history]
+        axl_opp = [axelrod.Action.C if a == Action.COOPERATE else axelrod.Action.D for a in opp_history]
+        mock_other.history = axelrod.History(axl_my)
+        opponent.history = axelrod.History(axl_opp)
         return opponent.strategy(mock_other)

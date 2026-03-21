@@ -4,6 +4,8 @@ Extends Harper 2017's EvolvedANN approach with modern DQN techniques:
 - Experience replay
 - Target network
 - Configurable architecture
+
+Uses the same 17-feature state representation as Harper's ANN.
 """
 
 import numpy as np
@@ -13,7 +15,7 @@ import torch.optim as optim
 from collections import deque
 from typing import Optional
 from src.agents.base import BaseAgent
-from src.environments.ipd import Action
+from src.environments.ipd import Action, NUM_FEATURES
 
 
 class QNetwork(nn.Module):
@@ -28,6 +30,10 @@ class QNetwork(nn.Module):
             prev_dim = h
         layers.append(nn.Linear(prev_dim, 2))  # 2 actions: C or D
         self.network = nn.Sequential(*layers)
+        # Bias toward cooperation: Q(C) starts higher than Q(D)
+        with torch.no_grad():
+            self.network[-1].bias[0] = 1.0   # C
+            self.network[-1].bias[1] = -1.0   # D
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.network(x)
@@ -64,7 +70,7 @@ class DeepQAgent(BaseAgent):
     def __init__(
         self,
         name: str = "Deep-Q",
-        memory_depth: int = 3,
+        state_dim: int = NUM_FEATURES,
         hidden_dims: list[int] = [64, 32],
         learning_rate: float = 1e-3,
         discount_factor: float = 0.95,
@@ -76,7 +82,7 @@ class DeepQAgent(BaseAgent):
         target_update_freq: int = 100,
         seed: Optional[int] = None,
     ):
-        super().__init__(name, memory_depth)
+        super().__init__(name, state_dim)
         self.gamma = discount_factor
         self.epsilon = epsilon
         self.epsilon_decay = epsilon_decay
@@ -87,7 +93,7 @@ class DeepQAgent(BaseAgent):
         self.training = True
         self.step_count = 0
 
-        state_dim = memory_depth * 2
+        # Small networks (< 100K params) are faster on CPU due to transfer overhead
         self.device = torch.device("cpu")
 
         # Networks
@@ -124,7 +130,6 @@ class DeepQAgent(BaseAgent):
         if len(self.replay_buffer) < self.batch_size:
             return
 
-        # Sample and train
         states, actions, rewards, next_states, dones = self.replay_buffer.sample(
             self.batch_size
         )
@@ -135,10 +140,8 @@ class DeepQAgent(BaseAgent):
         next_states_t = torch.FloatTensor(next_states).to(self.device)
         dones_t = torch.FloatTensor(dones).to(self.device)
 
-        # Current Q-values
         current_q = self.q_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze()
 
-        # Target Q-values
         with torch.no_grad():
             next_q = self.target_net(next_states_t).max(dim=1)[0]
             target_q = rewards_t + self.gamma * next_q * (1 - dones_t)
@@ -148,10 +151,8 @@ class DeepQAgent(BaseAgent):
         loss.backward()
         self.optimizer.step()
 
-        # Decay epsilon
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
-        # Update target network
         if self.step_count % self.target_update_freq == 0:
             self.target_net.load_state_dict(self.q_net.state_dict())
 
@@ -160,9 +161,6 @@ class DeepQAgent(BaseAgent):
             "type": "deep_q",
             "epsilon": self.epsilon,
             "step_count": self.step_count,
-            "model_state": {
-                k: v.tolist() for k, v in self.q_net.state_dict().items()
-            },
         }
 
     def save(self, path: str):

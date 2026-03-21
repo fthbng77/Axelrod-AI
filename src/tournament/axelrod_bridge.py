@@ -2,19 +2,20 @@
 
 Wraps RL agents as Axelrod-compatible players so they can compete
 directly in standard Axelrod tournaments against 200+ strategies.
+
+Uses Axelrod's native compute_features from ann.py for state encoding,
+ensuring our agents see the exact same 17-feature input as Harper's EvolvedANN.
 """
 
 import numpy as np
 import axelrod
+from axelrod.strategies.ann import compute_features as axelrod_compute_features
 from src.environments.ipd import Action
 from src.agents.base import BaseAgent
 
 
 class RLPlayer(axelrod.Player):
-    """Wraps any BaseAgent as an Axelrod-compatible player.
-
-    This is how our trained RL agents enter Axelrod tournaments.
-    """
+    """Wraps any BaseAgent as an Axelrod-compatible player."""
 
     name = "RL Agent"
     classifier = {
@@ -30,32 +31,18 @@ class RLPlayer(axelrod.Player):
         super().__init__()
         self.agent = agent
         self.agent.set_eval_mode()
-        self.memory_depth_val = agent.memory_depth
         if name:
             self.name = name
 
+    def __repr__(self):
+        return self.name
+
     def strategy(self, opponent: axelrod.Player) -> axelrod.Action:
-        """Convert state from Axelrod histories → RL state → action."""
-        state = self._build_state(opponent)
+        """Use Axelrod's native compute_features for state encoding."""
+        features = axelrod_compute_features(self, opponent)
+        state = features.astype(np.float32)
         action = self.agent.select_action(state)
         return axelrod.Action.C if action == Action.COOPERATE else axelrod.Action.D
-
-    def _build_state(self, opponent: axelrod.Player) -> np.ndarray:
-        """Build RL state vector from Axelrod history objects."""
-        md = self.memory_depth_val
-        state = np.full(md * 2, -1.0)
-
-        # Own recent actions
-        for i in range(min(len(self.history), md)):
-            action = self.history[-(i + 1)]
-            state[md - 1 - i] = 0.0 if action == axelrod.Action.C else 1.0
-
-        # Opponent's recent actions
-        for i in range(min(len(opponent.history), md)):
-            action = opponent.history[-(i + 1)]
-            state[md + md - 1 - i] = 0.0 if action == axelrod.Action.C else 1.0
-
-        return state
 
     def reset(self):
         super().reset()
@@ -68,7 +55,6 @@ def create_rl_player(agent: BaseAgent, name: str = None) -> RLPlayer:
     Creates a unique subclass per agent so Axelrod sees distinct names.
     """
     display_name = name or agent.name
-    # Axelrod uses class-level `name`, so create a dynamic subclass
     player_cls = type(
         f"RLPlayer_{display_name}",
         (RLPlayer,),
@@ -90,11 +76,9 @@ def run_tournament(
 
     players = []
 
-    # Add our RL agents
     for agent in rl_agents:
         players.append(create_rl_player(agent, name=agent.name))
 
-    # Add classic strategies
     if include_classics:
         classics = [
             axelrod.TitForTat(),
@@ -110,7 +94,6 @@ def run_tournament(
         ]
         players.extend(classics)
 
-    # Add Harper 2017 evolved strategies
     if include_evolved:
         evolved = [
             axelrod.EvolvedANN(),
@@ -138,7 +121,7 @@ def run_tournament(
     return results
 
 
-def print_results(results: axelrod.ResultSet, top_n: int = 25):
+def print_results(results: axelrod.ResultSet, top_n: int = 30):
     """Pretty-print tournament results."""
     print(f"\n{'Rank':>4} {'Strategy':<35} {'Score/Turn':>10}")
     print("-" * 55)
